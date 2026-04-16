@@ -1,0 +1,560 @@
+#include <ThreeWire.h>              // RTC
+#include <RtcDS1302.h>
+#include <EEPROM.h>
+#include "Arduino.h"                // DFPlayer
+#include "DFRobotDFPlayerMini.h"
+#include <SoftwareSerial.h>
+#include <Wire.h>                   // OLED
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// --- DFPlayer
+SoftwareSerial Serial1(7, 6);
+DFRobotDFPlayerMini myDFPlayer;
+
+// --- RTC DS1302
+ThreeWire myWire(12, 11, 13);          // IO, SCLK, CE
+RtcDS1302<ThreeWire> Rtc(myWire);
+RtcDateTime now;
+
+// --- Modo
+enum Modo : uint8_t { APAGADO, ANIMACION, MENU, CONFIG };
+Modo modo = ANIMACION;
+
+// --- Estado
+unsigned long t0 = 0, t_anim = 0, t_b3 = 0;
+uint16_t b1 = 0, b2 = 0, b3 = 0;       // contadores anti-rebote por nivel
+bool b3_presionado = false;
+int8_t ch = 0;
+const uint8_t pin_lowside[4] = {10, 9, 5, 8};
+uint8_t water_level = 75;
+
+// --- Riegos (estructura compacta)
+struct t_riego {
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+  uint8_t t_planta;                   // 0..3
+};
+t_riego riegos[4];
+
+const char plantas[4][10] PROGMEM = {
+  "potus",
+  "aroma",
+  "cactus",
+  "flores"
+};
+
+const uint8_t plantas_freq[4] PROGMEM = {3, 2, 10, 3};
+
+// --- Bitmaps en PROGMEM (sin cambios de contenido)
+const uint8_t eva_eye [] PROGMEM = {
+  0x00,0x1f,0xff,0x80,0x00,0x00,0x00,0x7f,0xff,0xf8,0x00,0x00,0x01,0xff,0xff,0xfe,
+  0x00,0x00,0x07,0xff,0xff,0xff,0x80,0x00,0x0f,0xff,0xff,0xff,0xc0,0x00,0x1f,0xff,
+  0xff,0xff,0xf0,0x00,0x3f,0xff,0xff,0xff,0xf8,0x00,0x3f,0xff,0xff,0xff,0xfc,0x00,
+  0x7f,0xff,0xff,0xff,0xfe,0x00,0x7f,0xff,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0xff,
+  0xff,0x00,0xff,0xff,0xff,0xff,0xff,0x80,0xff,0xff,0xff,0xff,0xff,0xc0,0xff,0xff,
+  0xff,0xff,0xff,0xc0,0xff,0xff,0xff,0xff,0xff,0xc0,0x7f,0xff,0xff,0xff,0xff,0xc0,
+  0x7f,0xff,0xff,0xff,0xff,0xe0,0x7f,0xff,0xff,0xff,0xff,0xe0,0x3f,0xff,0xff,0xff,
+  0xff,0xc0,0x3f,0xff,0xff,0xff,0xff,0xc0,0x1f,0xff,0xff,0xff,0xff,0xc0,0x0f,0xff,
+  0xff,0xff,0xff,0xc0,0x07,0xff,0xff,0xff,0xff,0x80,0x03,0xff,0xff,0xff,0xff,0x80,
+  0x01,0xff,0xff,0xff,0xff,0x00,0x00,0xff,0xff,0xff,0xfe,0x00,0x00,0x3f,0xff,0xff,
+  0xf8,0x00,0x00,0x0f,0xff,0xff,0xf0,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,
+  0x3f,0xfe,0x00,0x00
+};
+const uint8_t eva_eye1 [] PROGMEM = {
+	0x00,0x00,0x3f,0xff,0x00,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x0f,0xff,0xff,
+	0xf0,0x00,0x00,0x3f,0xff,0xff,0xfc,0x00,0x00,0x7f,0xff,0xff,0xfe,0x00,0x01,0xff,
+	0xff,0xff,0xff,0x00,0x03,0xff,0xff,0xff,0xff,0x80,0x07,0xff,0xff,0xff,0xff,0x80,
+	0x0f,0xff,0xff,0xff,0xff,0xc0,0x1f,0xff,0xff,0xff,0xff,0xc0,0x1f,0xff,0xff,0xff,
+	0xff,0xe0,0x3f,0xff,0xff,0xff,0xff,0xe0,0x7f,0xff,0xff,0xff,0xff,0xe0,0x7f,0xff,
+	0xff,0xff,0xff,0xe0,0x7f,0xff,0xff,0xff,0xff,0xe0,0x7f,0xff,0xff,0xff,0xff,0xc0,
+	0xff,0xff,0xff,0xff,0xff,0xc0,0xff,0xff,0xff,0xff,0xff,0xc0,0x7f,0xff,0xff,0xff,
+	0xff,0x80,0x7f,0xff,0xff,0xff,0xff,0x80,0x7f,0xff,0xff,0xff,0xff,0x00,0x7f,0xff,
+	0xff,0xff,0xfe,0x00,0x3f,0xff,0xff,0xff,0xfc,0x00,0x3f,0xff,0xff,0xff,0xf8,0x00,
+	0x1f,0xff,0xff,0xff,0xf0,0x00,0x0f,0xff,0xff,0xff,0xe0,0x00,0x03,0xff,0xff,0xff,
+	0x80,0x00,0x01,0xff,0xff,0xfe,0x00,0x00,0x00,0x7f,0xff,0xf8,0x00,0x00,0x00,0x0f,
+	0xff,0x80,0x00,0x00
+};
+const uint8_t plant [] PROGMEM = {
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0f,0xc0,0x00,0x00,0x7f,0xf8,0x00,
+	0x01,0xff,0xfe,0x00,0x03,0xfe,0xff,0x00,0x07,0xfc,0x7f,0xc0,0x0f,0xf8,0x7f,0xc0,
+	0x1f,0xf0,0x3f,0xe0,0x3f,0xf0,0x3f,0xf0,0x3f,0xe0,0x1f,0xf0,0x3f,0xe0,0x1f,0xf0,
+	0x7f,0xe0,0x1f,0xf8,0x7f,0xe0,0x1f,0xf8,0x7f,0xe0,0x1f,0xf8,0x7f,0xf0,0x3f,0xf8,
+	0x7f,0xf8,0x7f,0xf8,0x7c,0x1f,0xe0,0xf8,0x3c,0x0f,0xc0,0xf8,0x3e,0x04,0x80,0xf0,
+	0x3e,0x04,0x81,0xf0,0x1f,0x04,0x83,0xe0,0x0f,0xcc,0xcf,0xc0,0x0f,0xfc,0xff,0xc0,
+	0x03,0xfc,0xff,0x80,0x01,0xff,0xfe,0x00,0x00,0x7f,0xf8,0x00,0x00,0x1f,0xe0,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+const uint8_t sun [] PROGMEM = {
+	0x00,0x08,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x0c,0x00,0x00,
+	0x0e,0x0c,0x18,0x00,0x0e,0x0c,0x38,0x00,0x03,0x80,0x60,0x00,0x03,0x00,0x60,0x00,
+	0x00,0x3f,0x00,0x00,0x00,0x7f,0x80,0x00,0x00,0xe3,0x80,0x00,0x7e,0xc1,0x9f,0x00,
+	0x7e,0xc1,0xbf,0x00,0x00,0xe3,0x8f,0x00,0x00,0xff,0x80,0x00,0x00,0x3f,0x00,0x00,
+	0x00,0x3e,0x00,0x00,0x03,0x80,0x60,0x00,0x07,0x08,0x70,0x00,0x0e,0x0c,0x18,0x00,
+	0x04,0x0c,0x10,0x00,0x00,0x0c,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x0c,0x00,0x00,
+	0x00,0x00,0x00,0x00
+};
+const uint8_t drop [] PROGMEM = { 0x10,0x38,0x7c,0x7c,0xde,0xde,0xfe,0x7c,0x38 };
+
+// --- Util: imprimir PROGMEM sin copiar a RAM
+static void print_P(const char* p) {
+  char c;
+  while ((c = pgm_read_byte(p++))) display.write(c);
+}
+
+// --- I/O
+void leerBotones() {
+  if (digitalRead(2)) b1++; else b1 = 0;
+  if (digitalRead(3)) b2++; else b2 = 0;
+  if (digitalRead(4)) b3++; else b3 = 0;
+}
+static inline bool boton() { leerBotones(); return (b1 || b2 || b3); }
+
+// --- Modo
+static void set_modo(Modo m) {
+  modo = m;
+  b3_presionado = false;
+  t0 = millis();
+  if (m == APAGADO) display.ssd1306_command(SSD1306_DISPLAYOFF);
+  else display.ssd1306_command(SSD1306_DISPLAYON);
+  display.clearDisplay();
+}
+
+// --- Riego
+static void guardarRiegos() {
+  RtcDateTime n = Rtc.GetDateTime();
+  for (uint8_t i = 0; i < 4; i++) {
+    riegos[i].year   = n.Year();
+    riegos[i].month  = n.Month();
+    riegos[i].day    = n.Day();
+    riegos[i].hour   = n.Hour();
+    riegos[i].minute = n.Minute();
+    riegos[i].second = n.Second();
+    riegos[i].t_planta = i;
+    EEPROM.put(i * sizeof(t_riego), riegos[i]);
+  }
+}
+static void leerRiegos() {
+  for (uint8_t i = 0; i < 4; i++) EEPROM.get(i * sizeof(t_riego), riegos[i]);
+}
+
+static void regar_canal(uint8_t channel) {
+  Serial.println(F("regando canal."));
+  if (channel > 3) return;
+
+  uint8_t pin = pin_lowside[channel];
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);
+
+  for (uint8_t i = 0; i < 100; i++) {
+    delay(100);
+    // refresco simple para ahorrar RAM y CPU
+    display.clearDisplay();
+    //display.drawBitmap(50, 20, plant, 30, 30, SSD1306_WHITE);
+    print_menu(channel);
+    display.display();
+    display.drawBitmap(20, 20, drop, 7, 9, SSD1306_WHITE);
+    display.display();
+  }
+  digitalWrite(pin, LOW);
+
+  RtcDateTime n = Rtc.GetDateTime();
+  riegos[channel].year   = n.Year();
+  riegos[channel].month  = n.Month();
+  riegos[channel].day    = n.Day();
+  riegos[channel].hour   = n.Hour();
+  riegos[channel].minute = n.Minute();
+  riegos[channel].second = n.Second();
+  EEPROM.put(channel * sizeof(t_riego), riegos[channel]);
+}
+
+static void chequearRiegos() {
+  static uint32_t prev_check = 0;
+  uint32_t t = millis();
+  if (t - prev_check < 60000UL) return;
+  prev_check = t;
+
+  uint32_t ahora = now.Unix32Time();
+  for (uint8_t i = 0; i < 4; i++) {
+    RtcDateTime ult(
+      riegos[i].year, riegos[i].month, riegos[i].day,
+      riegos[i].hour, riegos[i].minute, riegos[i].second
+    );
+    uint32_t t_ult = ult.Unix32Time();
+    uint8_t tipo = riegos[i].t_planta;
+    uint8_t dias = pgm_read_byte(&plantas_freq[tipo]);
+    if ((ahora - t_ult) >= (uint32_t)dias * 86400UL) regar_canal(i);
+  }
+}
+
+// --- Dibujo
+static inline void eva_eyes() {
+  display.drawBitmap(16, 17, eva_eye, 43, 30, SSD1306_WHITE);
+  display.drawBitmap(69, 17, eva_eye1, 43, 30, SSD1306_WHITE);
+}
+static void fillEllipse(int16_t x0, int16_t y0, int16_t rx, int16_t ry, uint16_t color) {
+  for (int16_t y = -ry; y <= ry; y++) {
+    int16_t dx = (int16_t)((long)rx * sqrt(1.0 - ((float)y * y) / (ry * ry)));
+    display.drawFastHLine(x0 - dx, y0 + y, 2 * dx, color);
+  }
+}
+
+// Animaciones sin lambdas ni floats costosos
+static void eva_blink() {
+  int i, y, dx, dy, tt;
+  for (uint8_t dir = 0; dir < 2; dir++) {
+    for (i = 0; i <= 10; i++) {
+      int k = dir ? 10 - i : i;
+      y = SCREEN_HEIGHT + 20 - (k * (SCREEN_HEIGHT / 2 + 7)) / 10;
+      dx = dy = 0;
+      if (k > 3 && k < 7) {
+        tt = (k - 3) * 3216 / 10;  // seno aprox *1000
+        dx = (3 * tt) / 1000;
+        dy = dx / 2;
+      }
+      display.clearDisplay();
+      display.drawBitmap(16 + dx, 17 + dy, eva_eye, 43, 30, SSD1306_WHITE);
+      display.drawBitmap(69 + dx, 17 + dy, eva_eye1, 43, 30, SSD1306_WHITE);
+      display.fillCircle(SCREEN_WIDTH / 4, y, 20, SSD1306_BLACK);
+      display.fillCircle(3 * SCREEN_WIDTH / 4, y, 20, SSD1306_BLACK);
+      display.display();
+      delay(12);
+    }
+  }
+}
+static void eva_frown() {
+  myDFPlayer.play( random(10, 12) );
+  delay(80);
+  // subir
+  for (int i = 0; i <= 5; i++) {
+    int dy = i * 2;
+    display.clearDisplay();
+    display.drawBitmap(16, 17 - dy, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69, 17 - dy, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display();
+    delay(10);
+  }
+  // bajar
+  for (int i = 5; i >= 0; i--) {
+    int dy = i * 2;
+    display.clearDisplay();
+    display.drawBitmap(16, 17 - dy, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69, 17 - dy, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display();
+    delay(10);
+  }
+  int y;
+  for (int i = 0; i <= 20; i++) {
+    y = (-30) + (i * (SCREEN_HEIGHT / 2 - 15 + 30)) / 20;
+    display.clearDisplay(); eva_eyes();
+    fillEllipse(SCREEN_WIDTH / 2, y, SCREEN_WIDTH / 3, 15, SSD1306_BLACK);
+    display.display(); delay(40);
+  }
+  delay(500);
+  for (int i = 20; i >= 0; i--) {
+    y = (-30) + (i * (SCREEN_HEIGHT / 2 - 15 + 30)) / 20;
+    display.clearDisplay(); eva_eyes();
+    fillEllipse(SCREEN_WIDTH / 2, y, SCREEN_WIDTH / 3, 15, SSD1306_BLACK);
+    display.display(); delay(40);
+  }
+}
+static void eva_wink() {
+  myDFPlayer.play( random(1, 5) );
+  delay(120);
+  for (uint8_t dir = 0; dir < 2; dir++) {
+    for (int i = 0; i <= 10; i++) {
+      int k = dir ? 10 - i : i;
+      int y = SCREEN_HEIGHT + 20 - (k * (SCREEN_HEIGHT / 2 + 7)) / 10;
+      int dx = 0, dy = 0;
+      if (k > 3 && k < 7) {
+        int tt = (k - 3) * 3216 / 10; // seno aprox *1000
+        dx = (3 * tt) / 1000;
+        dy = dx / 2;
+      }
+      display.clearDisplay();
+      display.drawBitmap(16 + dx, 17 + dy, eva_eye, 43, 30, SSD1306_WHITE);
+      display.drawBitmap(69 + dx, 17 + dy, eva_eye1, 43, 30, SSD1306_WHITE);
+      display.fillCircle(3 * SCREEN_WIDTH / 4, y, 20, SSD1306_BLACK);
+      display.display();
+      delay(12);
+    }
+  }
+}
+static void eva_bounce() {
+  myDFPlayer.play( random(7, 10) );
+  delay(80);
+  const int s = 1, d = 25;
+  for (int i = 0; i <= 20; i += 2) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy - i, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy - i, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display(); delay(d);
+  }
+  for (int i = 20; i >= 0; i -= 2) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy - i, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy - i, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display(); delay(d);
+  }
+  for (int i = 0; i <= 5; i += 2) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy - i, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy - i, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display(); delay(d);
+  }
+  for (int i = 5; i >= 0; i -= 2) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy - i, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy - i, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display(); delay(d);
+  }
+  for (int i = 0; i <= 10; i += 2) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy + i, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy + i, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display(); delay(d);
+  }
+  for (int i = 10; i >= 0; i -= 2) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy + i, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy + i, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display(); delay(d);
+  }
+}
+static void eva_happy() {
+  myDFPlayer.play( random(5, 7) );
+  delay(80);
+  const int r = 20, steps = 10, eye_shift = 3;
+  const int y_bottom = SCREEN_HEIGHT + r;
+  const int y_top = (SCREEN_HEIGHT / 2) + r - 13;
+  const int delay_ms = 20;
+
+  for (uint8_t dir = 0; dir < 2; dir++) {
+    for (int i = 0; i <= steps; i++) {
+      int k = dir ? steps - i : i;
+      int y = y_bottom - ( (long)k * (y_bottom - y_top) ) / steps;
+      int dx = 0, dy = 0;
+      if (k > steps / 3 && k < 2 * steps / 3) {
+        // seno aproximado con triángulo suavizado, sin float
+        int tt = (k - steps / 3) * 1000 / (steps / 3);   // 0..1000
+        if (tt > 500) tt = 1000 - tt;                    // 0..500
+        dx = (eye_shift * tt) / 500;                     // 0..eye_shift
+        dy = dx / 2;
+      }
+      display.clearDisplay();
+      display.drawBitmap(16 + dx, 17 + dy, eva_eye, 43, 30, SSD1306_WHITE);
+      display.drawBitmap(69 + dx, 17 + dy, eva_eye1, 43, 30, SSD1306_WHITE);
+      display.fillCircle(SCREEN_WIDTH / 4, y, r, SSD1306_BLACK);
+      display.fillCircle(3 * SCREEN_WIDTH / 4, y, r, SSD1306_BLACK);
+      display.display();
+      delay(delay_ms);
+
+      if (!dir && i == steps) {
+        unsigned long tstart = millis();
+        while (millis() - tstart < 900) {
+          int dxr = random(-6, 7), dyr = random(-6, 7);
+          display.clearDisplay();
+          display.drawBitmap(16 + dxr, 17 + dyr, eva_eye, 43, 30, SSD1306_WHITE);
+          display.drawBitmap(69 + dxr, 17 + dyr, eva_eye1, 43, 30, SSD1306_WHITE);
+          display.fillCircle(SCREEN_WIDTH / 4 + dxr, y_top + dyr, r, SSD1306_BLACK);
+          display.fillCircle(3 * SCREEN_WIDTH / 4 + dxr, y_top + dyr, r, SSD1306_BLACK);
+          display.display();
+          delay(50);
+        }
+      }
+    }
+  }
+}
+
+static void print_menu(uint8_t channel) {
+  display.clearDisplay();
+  display.drawBitmap(50, 20, plant, 30, 30, SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print(F("CH"));
+  display.print(channel);
+
+  display.setCursor(68, 0);
+  if (now.Hour() < 10) display.print('0');
+  display.print(now.Hour());
+  display.print(':');
+  if (now.Minute() < 10) display.print('0');
+  display.print(now.Minute());
+
+  // nombre de planta directo desde PROGMEM sin buffer temporal
+  display.setTextSize(2);
+  if (riegos[channel].t_planta < 2) display.setCursor(35, 50);
+  else display.setCursor(30, 50);
+  char nombre[10];
+  strncpy_P(nombre, plantas[riegos[channel].t_planta], sizeof(nombre) - 1);
+  nombre[sizeof(nombre) - 1] = '\0';  // asegurar terminador
+  display.print(nombre);
+  // icono sol y barra de agua
+  display.fillRect(103, 39, 25, 25, SSD1306_BLACK);
+  display.drawBitmap(103, 39, sun, 25, 25, SSD1306_WHITE);
+
+  display.fillRect(5, 20, 10, 44, SSD1306_WHITE);
+  uint8_t h = (uint8_t)((42UL * water_level) / 100UL);
+  display.fillRect(6, 62 - h, 8, h, SSD1306_BLACK);
+
+  display.display();
+}
+
+// --- Setup / Loop
+void setup() {
+  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
+  display.clearDisplay();
+
+  Serial.begin(9600);
+  Serial1.begin(9600);
+
+  if (!myDFPlayer.begin(Serial1)) { Serial.println(F("Err1")); while (1) {} }
+  myDFPlayer.volume(2);
+  myDFPlayer.EQ(DFPLAYER_EQ_NORMAL);
+
+  // botones con pull-up para evitar falsos
+  pinMode(2, INPUT);
+  pinMode(3, INPUT);
+  pinMode(4, INPUT);
+
+  Rtc.Begin();
+  RtcDateTime compiled(__DATE__, __TIME__);
+  if (!Rtc.IsDateTimeValid()) Rtc.SetDateTime(compiled);
+  if (!Rtc.GetIsRunning()) Rtc.SetIsRunning(true);
+  now = Rtc.GetDateTime();
+  if (now < compiled) Rtc.SetDateTime(compiled);
+
+  leerRiegos();                    // si EEPROM está vacía, considerar llamar a guardarRiegos()
+  randomSeed(analogRead(0));       // una sola vez
+  eva_wink();
+}
+
+void loop() {
+  now = Rtc.GetDateTime();
+  if (!now.IsValid()) Serial.println(F("Err2"));
+
+  bool b = boton();
+  unsigned long t = millis();
+  switch (modo) {
+  case ANIMACION:
+    if (b) set_modo(MENU);
+    else {
+      if (t - t_anim > 15000UL) {
+        eva_eyes();
+        switch (random(4)) {
+          case 0: eva_blink(); break;
+          case 1: eva_frown(); break;
+          case 2: eva_bounce(); break;
+          default: eva_happy(); break;
+        }
+        t_anim = t;
+      }
+      if (t - t0 > 60000UL) set_modo(APAGADO);
+    }
+    break;
+
+  case MENU: {
+    if (b1 == 1) { ch--; if (ch < 0) ch = 3; t0 = t; }
+    if (b2 == 1) { ch++; if (ch > 3) ch = 0; t0 = t; }
+    if (b3 == 1) t0 = t;
+
+    // --- b3: corto = regar, largo = CONFIG ---
+    static bool b3_down = false;
+    static unsigned long t_press = 0;
+    bool pressed = digitalRead(4);  // HIGH = presionado
+
+    if (pressed && !b3_down) {          // inicio
+      b3_down = true;
+      t_press = millis();
+    }
+    if (!pressed && b3_down) {          // soltado
+      unsigned long dur = millis() - t_press;
+      b3_down = false;
+      if (dur < 1500UL) {               // corto -> riego
+        regar_canal(ch);
+        print_menu(ch);
+        display.display();
+      } 
+      else if (dur >= 1500UL) {         // largo -> config
+        set_modo(CONFIG);
+        return;
+      }
+    }
+
+    print_menu((uint8_t)ch);
+    chequearRiegos();
+    if (t - t0 > 30000UL) set_modo(ANIMACION);
+    break;
+  }
+
+  case CONFIG: {
+    static bool b3_down_cfg = false;
+    static unsigned long t_press_cfg = 0;
+    bool pressed_cfg = digitalRead(4);
+
+    // mantener b3 para volver al MENU
+    if (pressed_cfg && !b3_down_cfg) {
+      b3_down_cfg = true;
+      t_press_cfg = millis();
+    }
+    if (!pressed_cfg && b3_down_cfg) {
+      unsigned long dur = millis() - t_press_cfg;
+      b3_down_cfg = false;
+      if (dur >= 1500UL) {
+        set_modo(MENU);
+        return;
+      }
+    }
+
+    // ajustar minutos con b1 / b2
+    if (b2 == 1) {
+      now = Rtc.GetDateTime();
+      RtcDateTime newTime(now.Year(), now.Month(), now.Day(),
+                          now.Hour(), (now.Minute() + 1) % 60, now.Second());
+      Rtc.SetDateTime(newTime);
+      now = newTime;
+    }
+    if (b1 == 1) {
+      now = Rtc.GetDateTime();
+      int m = now.Minute() - 1; if (m < 0) m = 59;
+      RtcDateTime newTime(now.Year(), now.Month(), now.Day(),
+                          now.Hour(), m, now.Second());
+      Rtc.SetDateTime(newTime);
+      now = newTime;
+    }
+
+    // mostrar reloj
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(10, 20);
+    display.print(F("CFG "));
+    if (now.Hour() < 10) display.print('0');
+    display.print(now.Hour());
+    display.print(':');
+    if (now.Minute() < 10) display.print('0');
+    display.print(now.Minute());
+    display.display();
+    break;
+  }
+
+  case APAGADO:
+    chequearRiegos();
+    if (b) set_modo(MENU);
+    break;
+}
+
+}

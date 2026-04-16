@@ -1,0 +1,427 @@
+#include <ThreeWire.h> //librerias Real-Time
+#include <RtcDS1302.h>
+
+#include <EEPROM.h>
+
+#include "Arduino.h" //librerias sobre DFplayer.
+#include "DFRobotDFPlayerMini.h" 
+//#include <SoftwareSerial.h>
+#include <NeoSWSerial.h>
+
+#include <Wire.h> // librerias sobre oled.
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128 //parametros oled.
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+const int anim_max_time = 100; 
+
+NeoSWSerial Serial1(7, 6);   // RX=6, TX=7
+DFRobotDFPlayerMini myDFPlayer;  
+
+#define countof(a) (sizeof(a) / sizeof(a[0]))// parametros Real-Time
+ThreeWire myWire(12, 11, 13);  // IO, SCLK, CE
+RtcDS1302<ThreeWire> Rtc(myWire);
+RtcDateTime now;
+
+enum Modo { APAGADO, ANIMACION, MENU };
+Modo modo = ANIMACION;
+unsigned long t0 = 0, t_anim = 0;
+short b1, b2, b3;
+unsigned long t_b2 = 0;   // tiempo desde que se presiona b2
+bool b2_presionado = false;
+const char* const plantas[] PROGMEM = {"potus", "aromatica", "cactus", "flores"};
+struct t_riego {
+  int dias_desde_ultimo;
+  int t_planta;
+};
+t_riego riegos[4];
+int ch = 0;
+int pin_lowside[4] = {8, 9, 12, 13};
+
+void regar_canal(unsigned int channel) {
+  pinMode(pin_lowside[channel -1], OUTPUT);
+  digitalWrite(pin_lowside[channel -1 ], HIGH);
+  for(int i = 0 ; i<10;i++){
+    delay(1000);
+    Serial.print(".") ;
+  }
+  digitalWrite(pin_lowside[channel], LOW);
+}
+
+
+const unsigned char eva_eye [] PROGMEM = {
+  0x00,0x1f,0xff,0x80,0x00,0x00,0x00,0x7f,0xff,0xf8,0x00,0x00,0x01,0xff,0xff,0xfe,
+  0x00,0x00,0x07,0xff,0xff,0xff,0x80,0x00,0x0f,0xff,0xff,0xff,0xc0,0x00,0x1f,0xff,
+  0xff,0xff,0xf0,0x00,0x3f,0xff,0xff,0xff,0xf8,0x00,0x3f,0xff,0xff,0xff,0xfc,0x00,
+  0x7f,0xff,0xff,0xff,0xfe,0x00,0x7f,0xff,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0xff,
+  0xff,0x00,0xff,0xff,0xff,0xff,0xff,0x80,0xff,0xff,0xff,0xff,0xff,0xc0,0xff,0xff,
+  0xff,0xff,0xff,0xc0,0xff,0xff,0xff,0xff,0xff,0xc0,0x7f,0xff,0xff,0xff,0xff,0xc0,
+  0x7f,0xff,0xff,0xff,0xff,0xe0,0x7f,0xff,0xff,0xff,0xff,0xe0,0x3f,0xff,0xff,0xff,
+  0xff,0xc0,0x3f,0xff,0xff,0xff,0xff,0xc0,0x1f,0xff,0xff,0xff,0xff,0xc0,0x0f,0xff,
+  0xff,0xff,0xff,0xc0,0x07,0xff,0xff,0xff,0xff,0x80,0x03,0xff,0xff,0xff,0xff,0x80,
+  0x01,0xff,0xff,0xff,0xff,0x00,0x00,0xff,0xff,0xff,0xfe,0x00,0x00,0x3f,0xff,0xff,
+  0xf8,0x00,0x00,0x0f,0xff,0xff,0xf0,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,
+  0x3f,0xfe,0x00,0x00
+};
+const unsigned char eva_eye1 [] PROGMEM = {
+	0x00, 0x00, 0x3f, 0xff, 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xc0, 0x00, 0x00, 0x0f, 0xff, 0xff, 
+	0xf0, 0x00, 0x00, 0x3f, 0xff, 0xff, 0xfc, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xfe, 0x00, 0x01, 0xff, 
+	0xff, 0xff, 0xff, 0x00, 0x03, 0xff, 0xff, 0xff, 0xff, 0x80, 0x07, 0xff, 0xff, 0xff, 0xff, 0x80, 
+	0x0f, 0xff, 0xff, 0xff, 0xff, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xc0, 0x1f, 0xff, 0xff, 0xff, 
+	0xff, 0xe0, 0x3f, 0xff, 0xff, 0xff, 0xff, 0xe0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xe0, 0x7f, 0xff, 
+	0xff, 0xff, 0xff, 0xe0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xe0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xc0, 
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc0, 0x7f, 0xff, 0xff, 0xff, 
+	0xff, 0x80, 0x7f, 0xff, 0xff, 0xff, 0xff, 0x80, 0x7f, 0xff, 0xff, 0xff, 0xff, 0x00, 0x7f, 0xff, 
+	0xff, 0xff, 0xfe, 0x00, 0x3f, 0xff, 0xff, 0xff, 0xfc, 0x00, 0x3f, 0xff, 0xff, 0xff, 0xf8, 0x00, 
+	0x1f, 0xff, 0xff, 0xff, 0xf0, 0x00, 0x0f, 0xff, 0xff, 0xff, 0xe0, 0x00, 0x03, 0xff, 0xff, 0xff, 
+	0x80, 0x00, 0x01, 0xff, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xf8, 0x00, 0x00, 0x00, 0x0f, 
+	0xff, 0x80, 0x00, 0x00
+};
+
+const unsigned char plant [] PROGMEM = {
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xc0, 0x00, 0x00, 0x7f, 0xf8, 0x00, 
+	0x01, 0xff, 0xfe, 0x00, 0x03, 0xfe, 0xff, 0x00, 0x07, 0xfc, 0x7f, 0xc0, 0x0f, 0xf8, 0x7f, 0xc0, 
+	0x1f, 0xf0, 0x3f, 0xe0, 0x3f, 0xf0, 0x3f, 0xf0, 0x3f, 0xe0, 0x1f, 0xf0, 0x3f, 0xe0, 0x1f, 0xf0, 
+	0x7f, 0xe0, 0x1f, 0xf8, 0x7f, 0xe0, 0x1f, 0xf8, 0x7f, 0xe0, 0x1f, 0xf8, 0x7f, 0xf0, 0x3f, 0xf8, 
+	0x7f, 0xf8, 0x7f, 0xf8, 0x7c, 0x1f, 0xe0, 0xf8, 0x3c, 0x0f, 0xc0, 0xf8, 0x3e, 0x04, 0x80, 0xf0, 
+	0x3e, 0x04, 0x81, 0xf0, 0x1f, 0x04, 0x83, 0xe0, 0x0f, 0xcc, 0xcf, 0xc0, 0x0f, 0xfc, 0xff, 0xc0, 
+	0x03, 0xfc, 0xff, 0x80, 0x01, 0xff, 0xfe, 0x00, 0x00, 0x7f, 0xf8, 0x00, 0x00, 0x1f, 0xe0, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+
+
+bool boton() {
+  leerBotones();
+  return (b1 || b2 || b3);
+}
+
+void set_modo(Modo m) {
+  modo = m;
+  t0 = millis();
+  if (m == APAGADO) display.ssd1306_command(SSD1306_DISPLAYOFF);
+  else display.ssd1306_command(SSD1306_DISPLAYON);
+  display.clearDisplay();
+}
+
+void guardar_config_riego() {
+  // Inicializar valores
+  for (int i = 0; i < 4; i++) {
+    riegos[i].dias_desde_ultimo = 0;
+    riegos[i].t_planta = i;
+
+    // Calcular dirección base en EEPROM
+    int addr = i * sizeof(t_riego);
+    EEPROM.put(addr, riegos[i]);
+  }
+}
+void leerRiegos() {
+  for (int i = 0; i < 4; i++) {
+    int addr = i * sizeof(t_riego);
+    EEPROM.get(addr, riegos[i]);
+  }
+}
+void fillEllipse(int16_t x0, int16_t y0, int16_t rx, int16_t ry, uint16_t color) {
+  for (int16_t y = -ry; y <= ry; y++) {
+    int16_t dx = (int16_t)(rx * sqrt(1.0 - (float)(y * y) / (ry * ry)));
+    display.drawFastHLine(x0 - dx, y0 + y, 2 * dx, color);
+  }
+}
+void eva_eyes() {
+  display.drawBitmap(16, 17, eva_eye, 43, 30, SSD1306_WHITE);
+  display.drawBitmap(69, 17, eva_eye1, 43, 30, SSD1306_WHITE);  
+}
+void eva_blink() {
+  int i, y, dx, dy, tt;
+  for (int dir = 0; dir < 2; dir++) {
+    for (i = 0; i <= 10; i++) {
+      int k = (dir ? 10 - i : i);
+      y = SCREEN_HEIGHT + 20 - (k * (SCREEN_HEIGHT / 2 + 7)) / 10;
+      dx = dy = 0;
+      if (k > 3 && k < 7) {
+        tt = (k - 3) * 3216 / 10;  // seno aproximado *1000
+        dx = (3 * tt) / 1000;
+        dy = dx / 2;
+      }
+      display.clearDisplay();
+      display.drawBitmap(16 + dx, 17 + dy, eva_eye, 43, 30, SSD1306_WHITE);
+      display.drawBitmap(69 + dx, 17 + dy, eva_eye1, 43, 30, SSD1306_WHITE);
+      display.fillCircle(SCREEN_WIDTH / 4, y, 20, SSD1306_BLACK);
+      display.fillCircle(3 * SCREEN_WIDTH / 4, y, 20, SSD1306_BLACK);
+      display.display();
+      delay(12);
+    }
+  }
+}
+void eva_frown() {
+  randomSeed(analogRead(0));
+  myDFPlayer.play(random(10, 12));
+  delay(100);
+  for (int i = 0; i <= 5; i++) {               // subir
+    int dy = i * 2;
+    display.clearDisplay();
+    display.drawBitmap(16, 17 - dy, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69, 17 - dy, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display();
+    delay(10);
+  }
+  for (int i = 5; i >= 0; i--) {               // bajar
+    int dy = i * 2;
+    display.clearDisplay();
+    display.drawBitmap(16, 17 - dy, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69, 17 - dy, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display();
+    delay(10);
+  }
+
+  int y;
+  for (int i = 0; i <= 20; i++) {              // bajar elipse
+    y = (-30) + (i * (SCREEN_HEIGHT / 2 - 15 + 30)) / 20;
+    display.clearDisplay();
+    eva_eyes();
+    fillEllipse(SCREEN_WIDTH / 2, y, SCREEN_WIDTH / 3, 15, SSD1306_BLACK);
+    display.display();
+    delay(50);
+  }
+  delay(1000);
+  for (int i = 20; i >= 0; i--) {              // subir elipse
+    y = (-30) + (i * (SCREEN_HEIGHT / 2 - 15 + 30)) / 20;
+    display.clearDisplay();
+    eva_eyes();
+    fillEllipse(SCREEN_WIDTH / 2, y, SCREEN_WIDTH / 3, 15, SSD1306_BLACK);
+    display.display();
+    delay(50);
+  }
+}
+void eva_wink() {
+  randomSeed(analogRead(0));
+  myDFPlayer.play(random(1, 5));
+  delay(200);
+  
+  for (int dir = 0; dir < 2; dir++) {
+    for (int i = 0; i <= 10; i++) {
+      int k = dir ? 10 - i : i;
+      int y = SCREEN_HEIGHT + 20 - (k * (SCREEN_HEIGHT / 2 + 7)) / 10;
+      int dx = 0, dy = 0;
+      if (k > 3 && k < 7) {
+        int tt = (k - 3) * 3216 / 10; // seno aprox *1000
+        dx = (3 * tt) / 1000;
+        dy = dx / 2;
+      }
+      display.clearDisplay();
+      display.drawBitmap(16 + dx, 17 + dy, eva_eye, 43, 30, SSD1306_WHITE);
+      display.drawBitmap(69 + dx, 17 + dy, eva_eye1, 43, 30, SSD1306_WHITE);
+      display.fillCircle(3 * SCREEN_WIDTH / 4, y, 20, SSD1306_BLACK);
+      display.display();
+      delay(12);
+    }
+  }
+  
+}
+void eva_bounce() {
+  randomSeed(analogRead(0));
+  myDFPlayer.play(random(7, 10));
+  delay(100);
+  const int s = 1, d = 30;  // desplazamiento aleatorio y delay
+
+  auto drawEyes = [&](int y) {
+    display.clearDisplay();
+    int dx = random(-s, s + 1), dy = random(-s, s + 1);
+    display.drawBitmap(16 + dx, 17 + dy + y, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy + y, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.display();
+  };
+
+  for (int i = 0; i <= 20; i += 2) { drawEyes(-i); delay(d); }   // subir
+  for (int i = 20; i >= 0; i -= 2) { drawEyes(-i); delay(d); }   // bajar
+  for (int i = 0; i <= 5; i += 2)  { drawEyes(-i); delay(d); }   // rebote corto
+  for (int i = 5; i >= 0; i -= 2)  { drawEyes(-i); delay(d); }
+  for (int i = 0; i <= 10; i += 2) { drawEyes(i);  delay(d); }   // bajar final
+  for (int i = 10; i >= 0; i -= 2) { drawEyes(i);  delay(d); }
+}
+void eva_happy() {
+  randomSeed(analogRead(0));
+  myDFPlayer.play(random(5, 7));
+  delay(100);
+  const int r = 20, steps = 10, eye_shift = 3;
+  const int y_bottom = SCREEN_HEIGHT + r;
+  const int y_top = (SCREEN_HEIGHT / 2) + r - 13;
+  const int delay_ms = 25;
+
+  auto drawEyes = [&](int dx, int dy, int y) {
+    display.clearDisplay();
+    display.drawBitmap(16 + dx, 17 + dy, eva_eye, 43, 30, SSD1306_WHITE);
+    display.drawBitmap(69 + dx, 17 + dy, eva_eye1, 43, 30, SSD1306_WHITE);
+    display.fillCircle(SCREEN_WIDTH / 4, y, r, SSD1306_BLACK);
+    display.fillCircle(3 * SCREEN_WIDTH / 4, y, r, SSD1306_BLACK);
+    display.display();
+  };
+
+  for (int dir = 0; dir < 2; dir++) {  // subir y bajar
+    for (int i = 0; i <= steps; i++) {
+      int k = dir ? steps - i : i;
+      float t = (float)k / steps;
+      int y = y_bottom - t * (y_bottom - y_top);
+
+      int dx = 0, dy = 0;
+      if (k > steps / 3 && k < 2 * steps / 3) {
+        float tt = sin((float)(k - steps / 3) / (steps / 3) * 3.1416);
+        dx = (int)(eye_shift * tt);
+        dy = dx / 2;
+      }
+
+      drawEyes(dx, dy, y);
+      delay(delay_ms);
+
+      if (!dir && i == steps) {  // fase de felicidad (1 s)
+        unsigned long t0 = millis();
+        while (millis() - t0 < 1000) {
+          int dxr = random(-6, 7), dyr = random(-6, 7);
+          display.clearDisplay();
+          display.drawBitmap(16 + dxr, 17 + dyr, eva_eye, 43, 30, SSD1306_WHITE);
+          display.drawBitmap(69 + dxr, 17 + dyr, eva_eye1, 43, 30, SSD1306_WHITE);
+          display.fillCircle(SCREEN_WIDTH / 4 + dxr, y_top + dyr, r, SSD1306_BLACK);
+          display.fillCircle(3 * SCREEN_WIDTH / 4 + dxr, y_top + dyr, r, SSD1306_BLACK);
+          display.display();
+          delay(60);
+        }
+      }
+    }
+  }
+}
+void printDateTime(const RtcDateTime& dt) {
+  char datestring[20];
+
+  snprintf_P(datestring,
+             countof(datestring),
+             PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
+             dt.Month(),
+             dt.Day(),
+             dt.Year(),
+             dt.Hour(),
+             dt.Minute(),
+             dt.Second());
+  Serial.print(datestring);
+}
+void leerBotones() {
+  if(digitalRead(2) == HIGH) b1++;
+  else if (digitalRead(2) == LOW) b1=0;
+  if(digitalRead(3) == HIGH) b2++;
+  else if (digitalRead(3) == LOW) b2=0;
+  if(digitalRead(4) == HIGH) b3++;
+  else if (digitalRead(4) == LOW) b3=0;
+}
+void print_menu(int channel) {
+  display.clearDisplay();
+
+  display.drawBitmap(50, 20, plant, 30, 30, SSD1306_WHITE);
+  display.setTextSize(2);             
+  display.setTextColor(SSD1306_WHITE);        
+  display.setCursor(0,0);          
+  display.print(F("CH"));
+  display.print(channel);
+
+   display.setTextSize(2);
+  display.setCursor(68, 0);
+
+  if (now.Hour() < 10) display.print('0');
+  display.print(now.Hour());
+  display.print(':');
+  if (now.Minute() < 10) display.print('0');
+  display.print(now.Minute());
+
+  display.display();
+}
+void setup() {
+  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS); // iniciamos y limpiamos display
+  display.clearDisplay();
+
+  Serial.begin(9600);
+  Serial1.begin(9600);
+
+  Serial.print("In.E: ");
+  
+  if (!myDFPlayer.begin(Serial1)) { //no se detecto el dfplayer
+    Serial.println("Err1");
+    while (true);
+  }
+
+  Serial.print("DFd"); //configuramos el dfplayer
+  myDFPlayer.volume(30);
+  myDFPlayer.EQ(DFPLAYER_EQ_NORMAL);
+  myDFPlayer.outputDevice(DFPLAYER_DEVICE_SD);
+
+  pinMode(8, INPUT); //lowside
+  pinMode(9, INPUT);
+  pinMode(12, INPUT);
+  pinMode(13, INPUT); 
+
+  pinMode(2, INPUT); //botones
+  pinMode(3, INPUT);
+  pinMode(4, INPUT);
+
+  Rtc.Begin(); //iniciamos el DFplayer
+  RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
+  if (!Rtc.IsDateTimeValid()) Rtc.SetDateTime(compiled);
+  if (!Rtc.GetIsRunning()) Rtc.SetIsRunning(true);
+  now = Rtc.GetDateTime();
+  if (now < compiled) Rtc.SetDateTime(compiled);
+  eva_wink();
+  leerRiegos();
+}
+
+void loop() {
+  now = Rtc.GetDateTime();
+  //printDateTime(now);
+  //Serial.println();
+  if (!now.IsValid()) Serial.println("Err2");//RTC lost confidence in the DateTime!
+  bool b = boton();
+  unsigned long t = millis();
+
+  switch (modo) {
+
+    case ANIMACION:
+      if (b) set_modo(MENU);
+      else {
+        if (t - t_anim > 15000) {  // cada 15 s
+          eva_eyes();
+          switch (random(4)) {
+            case 0: eva_blink(); break;
+            case 1: eva_frown(); break;
+            case 2: eva_bounce(); break;
+            case 3: eva_happy(); break;
+          }
+          t_anim = t;
+        }
+        if (t - t0 > 60000) set_modo(APAGADO); // 1 min sin tocar
+      }
+      break;
+
+     case MENU:
+      // --- cambio de canal con pulsos cortos
+      if (b1 == 1) { ch--; if (ch < 0) ch = 3; t0 = t; }
+      if (b2 == 1) { ch++; if (ch > 3) ch = 0; t0 = t; }
+      if (b3 == 1) t0 = t;
+
+      // --- detección de presión prolongada del botón 2
+      if (digitalRead(3) == HIGH) {
+        if (!b2_presionado) { b2_presionado = true; t_b2 = t; }
+        else if (t - t_b2 > 2000) {  // 2 s sostenido
+          regar_canal(ch);
+          b2_presionado = false;
+        }
+      } else b2_presionado = false;
+
+      print_menu(ch);
+      if (t - t0 > 10000) set_modo(ANIMACION);
+      break;
+
+    case APAGADO:
+      if (b) set_modo(MENU);
+      break;
+  }
+}
